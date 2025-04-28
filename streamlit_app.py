@@ -31,10 +31,13 @@ st.set_page_config(
 
 # Check if NLTK data exists before downloading
 nltk_data_path = os.path.expanduser('~/nltk_data')
+
 if not os.path.exists(os.path.join(nltk_data_path, 'tokenizers/punkt')):
-    nltk.download('punkt')
+    nltk.download('punkt', download_dir=nltk_data_path)
 if not os.path.exists(os.path.join(nltk_data_path, 'corpora/stopwords')):
-    nltk.download('stopwords')
+    nltk.download('stopwords', download_dir=nltk_data_path)
+
+nltk.data.path.append(nltk_data_path)  # <-- Important!
 
 
 
