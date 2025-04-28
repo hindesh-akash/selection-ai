@@ -252,9 +252,11 @@ with tab1:
     st.header("Select a UPSC Question")
     
     # Create a dropdown with all questions
-    question_options = {f"Question {k}: {v['question'][:70]}..." if len(v['question']) > 70 else f"Question {k}: {v['question']}" 
-                        for k, v in upsc_qa.items()}
-    
+    question_options = {
+        f"Question {k}: {v['question'][:70]}..." if len(v['question']) > 70 else f"Question {k}: {v['question']}": k 
+        for k, v in upsc_qa.items()
+    }
+
     selected_question = st.selectbox(
         "Choose a question to answer:",
         options=list(question_options.keys()),
