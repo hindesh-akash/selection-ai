@@ -22,6 +22,13 @@ from nltk.corpus import stopwords
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+# Page config
+st.set_page_config(
+    page_title="SelectionAI - Handwritten Answer Evaluation",
+    page_icon="📝",
+    layout="wide"
+)
+
 # Check if NLTK data exists before downloading
 nltk_data_path = os.path.expanduser('~/nltk_data')
 if not os.path.exists(os.path.join(nltk_data_path, 'tokenizers/punkt')):
@@ -29,12 +36,7 @@ if not os.path.exists(os.path.join(nltk_data_path, 'tokenizers/punkt')):
 if not os.path.exists(os.path.join(nltk_data_path, 'corpora/stopwords')):
     nltk.download('stopwords')
 
-# Page config
-st.set_page_config(
-    page_title="SelectionAI - Handwritten Answer Evaluation",
-    page_icon="📝",
-    layout="wide"
-)
+
 
 # UPSC Questions and Answers
 upsc_qa = {
