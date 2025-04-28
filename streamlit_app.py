@@ -2,47 +2,92 @@
 import streamlit as st
 import os
 import tempfile
-import pytesseract
-import cv2
-import numpy as np
 from pdf2image import convert_from_path
-import nltk
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords# streamlit_app.py
-import streamlit as st
-import os
-import tempfile
-import pytesseract
-import cv2
 import numpy as np
-from pdf2image import convert_from_path
-import nltk
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.feature_extraction.text import TfidfVectorizer
+from PIL import Image
+import torch # PyTorch is often a dependency for transformers
 
-# Page config
+# --- Hugging Face Imports ---
+# Using try-except for optional dependencies or different environments
+try:
+    from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
+    from sentence_transformers import SentenceTransformer, util
+    hf_import_success = True
+except ImportError:
+    st.error("""
+        Failed to import Hugging Face libraries. Please install them:
+        `pip install streamlit torch transformers sentence-transformers Pillow pdf2image python-dotenv`
+        You might also need system dependencies like poppler:
+        - Ubuntu/Debian: `sudo apt-get update && sudo apt-get install -y poppler-utils`
+        - macOS: `brew install poppler`
+        - Windows: Download from https://github.com/oschwartz10612/poppler-windows/releases/
+    """)
+    hf_import_success = False
+    st.stop() # Stop execution if core libraries are missing
+
+# --- Page Config ---
 st.set_page_config(
-    page_title="SelectionAI - Handwritten Answer Evaluation",
-    page_icon="📝",
+    page_title="SelectionAI HF - Answer Evaluation",
+    page_icon="🤖",
     layout="wide"
 )
 
-# Check if NLTK data exists before downloading
-nltk_data_path = os.path.expanduser('~/nltk_data')
+# --- Constants ---
+# Choose models (consider smaller models if resource-constrained)
+OCR_MODEL = "microsoft/trocr-base-handwritten" # Good for handwritten text
+# OCR_MODEL = "microsoft/trocr-base-printed" # Better for printed text
+SIMILARITY_MODEL = 'sentence-transformers/all-MiniLM-L6-v2' # Efficient & effective
+FEEDBACK_MODEL = 'google/flan-t5-base' # Good balance of capability and size
 
-if not os.path.exists(os.path.join(nltk_data_path, 'tokenizers/punkt')):
-    nltk.download('punkt', download_dir=nltk_data_path)
-    nltk.download('punkt_tab', download_dir=nltk_data_path)
-if not os.path.exists(os.path.join(nltk_data_path, 'corpora/stopwords')):
-    nltk.download('stopwords', download_dir=nltk_data_path)
+# --- Model Loading (Cached) ---
+# Cache models to avoid reloading on every interaction
+@st.cache_resource
+def load_ocr_pipeline():
+    """Loads the Hugging Face OCR pipeline."""
+    try:
+        # Ensure device is set correctly (use GPU if available)
+        device = 0 if torch.cuda.is_available() else -1
+        ocr_pipeline = pipeline("image-to-text", model=OCR_MODEL, device=device)
+        st.success(f"OCR Model ({OCR_MODEL}) loaded successfully.")
+        return ocr_pipeline
+    except Exception as e:
+        st.error(f"Error loading OCR model ({OCR_MODEL}): {e}")
+        st.info("This might be due to network issues, model availability, or incompatible libraries.")
+        return None
 
-nltk.data.path.append(nltk_data_path)  # <-- Important!
+@st.cache_resource
+def load_similarity_model():
+    """Loads the Sentence Transformer model."""
+    try:
+        model = SentenceTransformer(SIMILARITY_MODEL)
+        st.success(f"Similarity Model ({SIMILARITY_MODEL}) loaded successfully.")
+        return model
+    except Exception as e:
+        st.error(f"Error loading Similarity model ({SIMILARITY_MODEL}): {e}")
+        return None
+
+@st.cache_resource
+def load_feedback_model_and_tokenizer():
+    """Loads the Flan-T5 model and tokenizer for feedback generation."""
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(FEEDBACK_MODEL)
+        model = AutoModelForSeq2SeqLM.from_pretrained(FEEDBACK_MODEL)
+        st.success(f"Feedback Model ({FEEDBACK_MODEL}) loaded successfully.")
+        return model, tokenizer
+    except Exception as e:
+        st.error(f"Error loading Feedback model ({FEEDBACK_MODEL}): {e}")
+        return None, None
+
+# Load models only if Hugging Face libraries were imported successfully
+if hf_import_success:
+    ocr_pipe = load_ocr_pipeline()
+    similarity_model = load_similarity_model()
+    feedback_model, feedback_tokenizer = load_feedback_model_and_tokenizer()
+else:
+    ocr_pipe, similarity_model, feedback_model, feedback_tokenizer = None, None, None, None
 
 
-
-# UPSC Questions and Answers
+# --- UPSC Questions and Answers (Keep as is) ---
 upsc_qa = {
     1: {
         "question": "Discuss the significance of the 73rd Constitutional Amendment Act in strengthening grassroots democracy in India.",
@@ -51,407 +96,456 @@ upsc_qa = {
     2: {
         "question": "Analyze the impact of globalization on India's cultural diversity.",
         "answer": "Globalization has significantly influenced India's cultural landscape. Increased exposure to global ideas has enriched Indian traditions, cuisine, music, and cinema. Fusion forms in art, fashion, and lifestyle symbolize cultural amalgamation. Indian culture, through Bollywood, yoga, and festivals, has gained international acceptance. However, globalization has also triggered fears of cultural homogenization, where Western influences sometimes overshadow indigenous languages, crafts, and traditional values. There is a growing trend among urban youth to adopt Western lifestyles, sometimes at the cost of their cultural roots. Yet, globalization has also revived interest in India's heritage among diasporic communities and bolstered the economy through cultural tourism. Hence, globalization's impact on India's cultural diversity is complex — both enriching and challenging."
-    },
-    3: {
-        "question": "Evaluate the role of civil services in a democracy.",
-        "answer": "Civil services form the backbone of administrative machinery in a democracy like India. They implement government policies, maintain law and order, and deliver public services. As permanent executives, they provide continuity across political changes. Civil servants are expected to be neutral, efficient, and accountable, ensuring that democratic principles are upheld in administration. Their role in rural development, disaster management, health, education, and social justice is crucial. However, issues like bureaucratic inertia, corruption, and lack of accountability have sometimes undermined their credibility. Reforms like lateral entry, performance appraisal, and capacity building are being introduced to enhance their efficiency. A responsive, ethical, and citizen-centric civil service is essential to strengthen democracy."
-    },
-    4: {
-        "question": "Critically examine the concept of 'One Nation, One Election'.",
-        "answer": "The idea of 'One Nation, One Election' proposes simultaneous elections to the Lok Sabha and State Legislative Assemblies. Advocates argue it would reduce election costs, administrative burden, and political disruptions caused by frequent polls. It could lead to better policy continuity and governance focus. However, critics highlight constitutional and practical challenges, such as premature dissolution of assemblies, undermining federalism, and logistical complexities. Implementing this idea would require significant constitutional amendments and political consensus. It is essential to balance electoral efficiency with democratic vibrancy to ensure that such a reform strengthens, not weakens, India's democracy."
-    },
-    5: {
-        "question": "Discuss the challenges and opportunities of India's demographic dividend.",
-        "answer": "India's demographic dividend — a large working-age population — offers immense potential for economic growth. If harnessed effectively, it can lead to higher productivity, innovation, and consumption. However, challenges like unemployment, skill mismatch, poor education and healthcare infrastructure, and regional disparities could turn the dividend into a demographic disaster. To realize this opportunity, India must invest heavily in education, skill development, health, and job creation, particularly in sunrise sectors like technology, renewable energy, and services. Empowering women, promoting entrepreneurship, and encouraging labor-intensive industries are crucial. Timely policy interventions are key to converting this demographic potential into a demographic advantage."
-    },
-    6: {
-        "question": "Examine the relevance of Gandhian philosophy in contemporary India.",
-        "answer": "Gandhian philosophy — centered on non-violence, truth, self-reliance, and rural development — remains profoundly relevant today. In an era marked by violence, polarization, and environmental degradation, Gandhi's emphasis on non-violent conflict resolution, communal harmony, and sustainable living offers timeless lessons. His vision of Gram Swaraj aligns with modern ideas of decentralized governance. Concepts like Swadeshi promote self-sufficiency and local economies, vital for rural development. However, the commercialization of society and rapid technological changes pose challenges to fully implementing Gandhian ideals. Nevertheless, selective adoption of his principles can guide India's socio-economic and moral rejuvenation."
-    },
-    7: {
-        "question": "Analyze the implications of climate change for India's food security.",
-        "answer": "Climate change poses a serious threat to India's food security. Rising temperatures, erratic rainfall, frequent droughts, and floods adversely affect agricultural productivity. Staple crops like rice and wheat are vulnerable, leading to potential yield declines. Changing pest patterns and soil degradation further exacerbate the problem. Small and marginal farmers, who form the backbone of Indian agriculture, are particularly at risk. Adaptive strategies like crop diversification, climate-resilient seeds, improved irrigation, and better early warning systems are necessary. Strengthening agricultural research, extension services, and climate-smart policies are critical to ensure food security for India's growing population."
-    },
-    8: {
-        "question": "Discuss the ethical challenges in artificial intelligence applications.",
-        "answer": "Artificial Intelligence (AI) raises profound ethical challenges. Issues like bias in algorithms, lack of transparency (black box problem), and discrimination in automated decision-making systems highlight the risks. Data privacy, surveillance, and autonomy are also major concerns. In fields like healthcare, finance, and criminal justice, AI decisions can have life-altering consequences. There are fears of job losses, deepfakes, and weaponization of AI. Ethical frameworks that ensure fairness, accountability, transparency, and human oversight are essential. Multistakeholder involvement — governments, corporations, civil society — is necessary to develop ethical AI governance globally."
-    },
-    9: {
-        "question": "Evaluate the importance of federalism in India's polity.",
-        "answer": "Federalism is vital for India's vast and diverse society. It ensures power-sharing between the Centre and the States, balancing unity with regional autonomy. It accommodates linguistic, cultural, and ethnic diversity, thus strengthening national integration. Cooperative federalism promotes collaboration in policymaking, essential in areas like health, education, and disaster management. However, issues like financial centralization, misuse of central agencies, and political friction challenge federal principles. Strengthening institutions like the Inter-State Council and promoting fiscal federalism are necessary to rejuvenate India's federal spirit."
-    },
-    10: {
-        "question": "Analyze the role of technology in enhancing governance in India.",
-        "answer": "Technology has revolutionized governance in India. Initiatives like Digital India, Aadhaar, e-Governance services, and online grievance redressal have made governance more accessible, transparent, and efficient. Digital platforms for education, healthcare, and welfare delivery have expanded citizen engagement. Technologies like blockchain, AI, and GIS are being integrated into policymaking. However, digital divides, cybersecurity threats, and concerns about privacy persist. Inclusive digital literacy, robust data protection laws, and citizen-centric technology design are vital to maximize technology's benefits for governance."
-    },
-    11: {
-        "question": "Critically examine the effectiveness of the Right to Information (RTI) Act.",
-        "answer": "The RTI Act, 2005, empowered citizens to seek information from public authorities, promoting transparency and accountability. It has exposed corruption, ensured better service delivery, and strengthened democracy. However, challenges like bureaucratic resistance, lack of proactive disclosure, pendency of cases in Information Commissions, and recent amendments weakening its autonomy have affected its effectiveness. Strengthening Information Commissions, protecting whistleblowers, and creating a culture of openness within government departments are essential to realize the true potential of the RTI Act."
-    },
-    12: {
-        "question": "Discuss the challenges faced by the Indian judiciary.",
-        "answer": "The Indian judiciary plays a crucial role in upholding constitutional rights and the rule of law. However, it faces significant challenges such as case pendency, shortage of judges, procedural delays, and access to justice for marginalized groups. Judicial overreach and lack of transparency in appointments through the collegium system have also raised concerns. Reforms like digitization, faster appointments, alternative dispute resolution mechanisms, and a robust judicial accountability framework are needed to enhance efficiency and public trust."
-    },
-    13: {
-        "question": "Analyze the role of women in India's freedom struggle.",
-        "answer": "Women played a vital and inspiring role in India's freedom movement. Leaders like Rani Lakshmi Bai, Sarojini Naidu, Annie Besant, Aruna Asaf Ali, and Kasturba Gandhi led protests, organized movements, and inspired masses. Women participated in picketing, boycotts, satyagraha, and armed resistance. The freedom movement also catalyzed women's social empowerment, challenging traditional gender roles. Although often marginalized in historical narratives, their contributions laid the foundation for post-independence constitutional guarantees of gender equality. Recognizing their sacrifices is crucial for an inclusive understanding of India's independence struggle."
-    },
-    14: {
-        "question": "Examine the importance of ethical leadership in public administration.",
-        "answer": "Ethical leadership in public administration ensures fairness, integrity, transparency, and accountability in governance. It builds public trust, enhances service delivery, and creates a culture of ethical behavior among subordinates. In India, where corruption remains a concern, ethical leadership can combat systemic inefficiencies. Ethical leaders set personal examples, making institutions resilient and citizen-centric. However, pressures like political interference, vested interests, and institutional inertia often challenge ethical conduct. Training, incentives, and a strong legal framework are necessary to nurture ethical leadership."
-    },
-    15: {
-        "question": "Critically analyze the challenges of urbanization in India.",
-        "answer": "Urbanization in India has led to economic growth, innovation, and improved living standards. However, it has also created challenges like slum proliferation, traffic congestion, pollution, inadequate infrastructure, and social inequalities. Cities face stress on water, waste management, and housing. Unplanned urban expansion worsens disaster vulnerability and environmental degradation. Policies like Smart Cities Mission, AMRUT, and urban renewal programs aim to address these issues. Sustainable urban planning, affordable housing, inclusive growth, and resilient infrastructure are vital to make Indian cities livable and equitable."
     }
+    # Add more questions as needed
 }
 
-def extract_text_from_pdf(pdf_path):
-    """Extract text from PDF using OCR"""
-    # Convert PDF to images
-    with st.spinner('Converting PDF to images...'):
-        images = convert_from_path(pdf_path)
-    
-    # Extract text from each image using OCR
+# --- Core Functions (Modified) ---
+
+# Cache data processing functions
+@st.cache_data(show_spinner=False) # Show spinner manually inside
+def extract_text_from_pdf_hf(pdf_path, _ocr_pipeline):
+    """Extract text from PDF using Hugging Face OCR pipeline"""
+    if _ocr_pipeline is None:
+        st.error("OCR Pipeline not loaded. Cannot extract text.")
+        return ""
+
     extracted_text = ""
-    with st.spinner('Performing OCR on images...'):
-        progress_bar = st.progress(0)
-        for i, image in enumerate(images):
-            # Show progress
-            progress_bar.progress((i + 1) / len(images))
-            
-            # Convert PIL image to OpenCV format
-            open_cv_image = np.array(image) 
-            open_cv_image = open_cv_image[:, :, ::-1].copy() 
-            
-            # Preprocess the image for better OCR results
-            gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
-            thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-            
-            # Perform OCR
-            text = pytesseract.image_to_string(thresh)
-            extracted_text += text + "\n"
-    
-    return extracted_text
+    try:
+        with st.spinner('Converting PDF to images...'):
+            # Use thread_count for potential speedup, adjust based on system
+            images = convert_from_path(pdf_path, thread_count=4)
 
-def evaluate_answer(extracted_text, reference_answer):
-    """Compare the extracted text with the reference answer"""
-    # Create TF-IDF vectors for similarity comparison
-    vectorizer = TfidfVectorizer()
-    
-    # Create corpus with just these two documents
-    corpus = [reference_answer, extracted_text]
-    tfidf_matrix = vectorizer.fit_transform(corpus)
-    
-    # Calculate cosine similarity
-    similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
-    
-    return {
-        "similarity": similarity,
-        "reference_answer": reference_answer
-    }
+        st.info(f"Found {len(images)} page(s) in the PDF.")
 
-def generate_suggestions(student_answer, reference_answer):
-    """Generate suggestions for improving the answer"""
-    # Tokenize and clean both answers
-    stop_words = set(stopwords.words('english'))
-    
-    student_tokens = [w.lower() for w in word_tokenize(student_answer) if w.isalnum()]
-    reference_tokens = [w.lower() for w in word_tokenize(reference_answer) if w.isalnum()]
-    
-    # Remove stop words
-    student_tokens = [w for w in student_tokens if w not in stop_words]
-    reference_tokens = [w for w in reference_tokens if w not in stop_words]
-    
-    # Find missing key terms
-    key_terms = [term for term in reference_tokens if term not in student_tokens 
-                 and len(term) > 3]  # Only consider terms with length > 3
-    
-    # Get unique terms (deduplicate)
-    key_terms = list(set(key_terms))
-    
-    # Sort by possible importance (length can be a rough proxy for specialized terms)
-    key_terms.sort(key=len, reverse=True)
-    
-    suggestions = []
-    
-    # Length-based suggestions
-    if len(student_tokens) < len(reference_tokens) * 0.7:
-        suggestions.append("Your answer is too brief. Consider elaborating more on key concepts.")
-    
-    # Missing terms suggestions
-    if key_terms:
-        suggestions.append(f"Consider including these important concepts that were missing: {', '.join(key_terms[:5])}.")
-    
-    # Structure and content suggestions
-    if len(student_tokens) > 20:  # Only if we have a substantive answer
-        # Check if the answer covers multiple aspects (simple check based on paragraph breaks)
-        if student_answer.count('\n\n') < 2:
-            suggestions.append("Try structuring your answer with clear introduction, body, and conclusion paragraphs.")
-        
-        # Check for examples
-        example_indicators = ['example', 'instance', 'case', 'illustration', 'such as', 'for instance']
-        has_examples = any(indicator in student_answer.lower() for indicator in example_indicators)
-        if not has_examples:
-            suggestions.append("Include specific examples to strengthen your arguments.")
-    
-    # Quality suggestion based on similarity score
-    similarity = evaluate_answer(student_answer, reference_answer)["similarity"]
-    if similarity < 0.3:
-        suggestions.append("Your answer differs significantly from the reference. Review the subject material again.")
-    elif similarity < 0.5:
-        suggestions.append("Your answer covers some key points but needs improvement in accuracy and completeness.")
-    elif similarity < 0.7:
-        suggestions.append("Good attempt! To improve further, ensure you're addressing all aspects of the question.")
-    else:
-        suggestions.append("Excellent answer! For perfection, focus on precision of terminology and conciseness.")
-    
-    return suggestions
+        with st.spinner(f'Performing OCR using {OCR_MODEL}...'):
+            progress_bar = st.progress(0)
+            for i, image in enumerate(images):
+                try:
+                    # Convert PIL Image to format suitable for pipeline if needed
+                    # Most pipelines handle PIL images directly
+                    result = _ocr_pipeline(image)
+                    # The output format might vary slightly depending on the pipeline/model
+                    page_text = result[0]['generated_text'] if isinstance(result, list) and result else \
+                                result['generated_text'] if isinstance(result, dict) else str(result)
 
-def extract_key_concepts(text, n=8):
-    """Extract key concepts from text for focused feedback"""
-    # Tokenize and remove stopwords
-    stop_words = set(stopwords.words('english'))
-    words = [w.lower() for w in word_tokenize(text) if w.isalpha() and w.lower() not in stop_words and len(w) > 3]
-    
-    # Count word frequencies
-    from collections import Counter
-    word_counts = Counter(words)
-    
-    # Get most common words as key concepts
-    return [word for word, _ in word_counts.most_common(n)]
+                    extracted_text += page_text + "\n\n" # Add space between pages
+                except Exception as page_e:
+                    st.warning(f"Could not process page {i+1}: {page_e}")
+                finally:
+                    progress_bar.progress((i + 1) / len(images))
+            progress_bar.empty() # Remove progress bar after completion
 
-# Main App UI
-st.title("SelectionAI")
-st.subheader("UPSC Answer Evaluation Platform")
+    except Exception as e:
+        st.error(f"An error occurred during PDF processing or OCR: {e}")
+        # Provide more specific guidance if possible (e.g., Poppler path issues)
+        if "poppler" in str(e).lower():
+            st.error("This might indicate an issue with the Poppler installation or its path configuration.")
+        return "" # Return empty string on failure
 
-with st.expander("About SelectionAI", expanded=False):
-    st.write("""
+    if not extracted_text.strip():
+        st.warning("OCR process completed, but no text was extracted. The PDF might be image-only with no machine-readable text, or the OCR model struggled with the content.")
+
+    return extracted_text.strip()
+
+@st.cache_data(show_spinner="Calculating semantic similarity...")
+def evaluate_answer_hf(_similarity_model, extracted_text, reference_answer):
+    """Compare the extracted text with the reference answer using Sentence Transformers"""
+    if _similarity_model is None:
+        st.error("Similarity Model not loaded. Cannot evaluate.")
+        return {"similarity": 0.0, "reference_answer": reference_answer}
+    if not extracted_text or not reference_answer:
+        return {"similarity": 0.0, "reference_answer": reference_answer}
+
+    try:
+        # Encode texts into embeddings
+        embedding1 = _similarity_model.encode(reference_answer, convert_to_tensor=True)
+        embedding2 = _similarity_model.encode(extracted_text, convert_to_tensor=True)
+
+        # Calculate cosine similarity
+        similarity_score = util.pytorch_cos_sim(embedding1, embedding2).item() # Get scalar value
+
+        # Clamp score between 0 and 1 (sometimes similarity can be slightly outside)
+        similarity_score = max(0.0, min(1.0, similarity_score))
+
+        return {
+            "similarity": similarity_score,
+            "reference_answer": reference_answer
+        }
+    except Exception as e:
+        st.error(f"Error calculating similarity: {e}")
+        return {"similarity": 0.0, "reference_answer": reference_answer}
+
+
+@st.cache_data(show_spinner="Generating feedback with AI...")
+def generate_suggestions_hf(_feedback_model, _feedback_tokenizer, question, reference_answer, student_answer):
+    """Generate suggestions for improving the answer using a generative AI model"""
+    if _feedback_model is None or _feedback_tokenizer is None:
+        st.error("Feedback Model/Tokenizer not loaded. Cannot generate suggestions.")
+        return ["Feedback generation failed: Model not available."]
+    if not student_answer:
+         return ["Cannot generate feedback for an empty answer."]
+
+    try:
+        # Construct a detailed prompt for the T5 model
+        prompt = f"""
+        Context: Evaluate a student's answer for a UPSC (Indian Civil Services Exam) question.
+        Question: {question}
+
+        Reference Answer (Ideal Key Points): {reference_answer}
+
+        Student's Answer: {student_answer}
+
+        Task: Provide constructive feedback for the student. Analyze the student's answer based on the question and reference answer. Identify strengths and weaknesses regarding:
+        1. Relevance: Does the answer directly address the question?
+        2. Completeness: Are the key points from the reference answer covered?
+        3. Accuracy: Is the information presented correct?
+        4. Structure: Is the answer well-organized?
+        5. Clarity: Is the language clear and concise?
+
+        Output: Provide a bulleted list of specific, actionable suggestions for improvement. Start with a brief overall assessment. Do not just repeat the reference answer. Focus on *how* the student can improve.
+        Feedback:
+        """
+
+        # Ensure CUDA availability check for generation if applicable
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        _feedback_model.to(device) # Ensure model is on the correct device
+
+        inputs = _feedback_tokenizer(prompt, return_tensors="pt", max_length=1024, truncation=True).to(device)
+
+        # Adjust generation parameters as needed
+        outputs = _feedback_model.generate(
+            inputs.input_ids,
+            max_length=300,  # Max length of the generated feedback
+            num_beams=4,     # Beam search for better quality
+            early_stopping=True,
+            no_repeat_ngram_size=2 # Avoid repetitive phrases
+        )
+
+        suggestions_text = _feedback_tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        # Basic formatting (split into bullet points if model followed instructions)
+        suggestions_list = [s.strip() for s in suggestions_text.split('\n') if s.strip() and s.strip().startswith(('*', '-', '•'))]
+        if not suggestions_list: # Fallback if model didn't use bullets
+             suggestions_list = [suggestions_text]
+
+        return suggestions_list
+
+    except Exception as e:
+        st.error(f"Error generating feedback: {e}")
+        return ["An error occurred while generating feedback."]
+
+
+# --- Main App UI (Similar Structure, Updated Logic) ---
+st.title("SelectionAI - Enhanced Evaluation")
+st.subheader("UPSC Answer Evaluation using Hugging Face Models")
+
+with st.expander("About SelectionAI & Models Used", expanded=False):
+    st.write(f"""
     SelectionAI helps you evaluate your UPSC exam answers by:
-    1. Allowing you to select a question to answer
-    2. Extracting text from your handwritten answer using OCR
-    3. Comparing with reference answers
-    4. Providing suggestions for improvement
-    
+    1. Allowing you to select a question to answer.
+    2. Extracting text from your handwritten answer using **{OCR_MODEL}** from Hugging Face.
+    3. Comparing your answer with a reference answer using semantic similarity calculated by **{SIMILARITY_MODEL}**.
+    4. Providing AI-generated feedback and suggestions for improvement using **{FEEDBACK_MODEL}**.
+
     Simply select a question, upload a PDF with your handwritten answer, or type your answer directly!
     """)
+    st.caption(f"Models loaded: OCR ({'Yes' if ocr_pipe else 'No'}), Similarity ({'Yes' if similarity_model else 'No'}), Feedback ({'Yes' if feedback_model else 'No'})")
 
-# Two tabs: Choose question, and Upload answer
-tab1, tab2 = st.tabs(["Select Question", "Submit & Evaluate"])
 
-# Store question selection in session state
+# Check if models loaded successfully before proceeding
+if not all([ocr_pipe, similarity_model, feedback_model, feedback_tokenizer]):
+     st.warning("One or more AI models failed to load. Functionality will be limited. Please check the errors above and your environment setup.")
+     # Optionally disable parts of the UI if models are missing
+     # st.stop() # Or stop completely if core models are missing
+
+# Initialize session state variables
+default_question_id = list(upsc_qa.keys())[0]
 if 'selected_question_id' not in st.session_state:
-    st.session_state.selected_question_id = 1
+    st.session_state.selected_question_id = default_question_id
 if 'answer_text' not in st.session_state:
-    st.session_state.answer_text = ""
+    st.session_state.answer_text = "" # Stores typed text or extracted OCR text
 if 'evaluation_done' not in st.session_state:
     st.session_state.evaluation_done = False
-if 'extracted_text' not in st.session_state:
-    st.session_state.extracted_text = ""
-if 'evaluation_results' not in st.session_state:
+if 'evaluation_results' not in st.session_state: # Stores similarity score etc.
     st.session_state.evaluation_results = None
-if 'suggestions' not in st.session_state:
+if 'suggestions' not in st.session_state: # Stores AI generated feedback
     st.session_state.suggestions = []
 
-# First tab: Question selection
+# --- Tabs for Workflow ---
+tab1, tab2 = st.tabs(["1. Select Question", "2. Submit & Evaluate"])
+
+# --- Tab 1: Question Selection ---
 with tab1:
     st.header("Select a UPSC Question")
-    
-    # Create a dropdown with all questions
+
+    # Create a dropdown with truncated question previews
     question_options = {
-        f"Question {k}: {v['question'][:70]}..." if len(v['question']) > 70 else f"Question {k}: {v['question']}": k 
+        f"Q{k}: {v['question'][:70]}...": k
         for k, v in upsc_qa.items()
     }
+    # Find the index corresponding to the current session state ID
+    current_index = list(question_options.values()).index(st.session_state.selected_question_id)
 
-    selected_question = st.selectbox(
+    selected_question_preview = st.selectbox(
         "Choose a question to answer:",
         options=list(question_options.keys()),
-        index=st.session_state.selected_question_id - 1
+        index=current_index # Use the calculated index
     )
-    
-    # Extract the question number
-    question_id = int(selected_question.split(":")[0].replace("Question ", ""))
-    st.session_state.selected_question_id = question_id
-    
-    # Display the full question
-    st.subheader("Question:")
-    st.write(upsc_qa[question_id]["question"])
-    
-    st.info("After selecting your question, go to the 'Submit & Evaluate' tab to provide your answer.")
 
-# Second tab: Answer submission and evaluation
+    # Update session state if selection changes
+    new_question_id = question_options[selected_question_preview]
+    if st.session_state.selected_question_id != new_question_id:
+        st.session_state.selected_question_id = new_question_id
+        # Reset previous evaluation results when question changes
+        st.session_state.evaluation_done = False
+        st.session_state.answer_text = ""
+        st.session_state.evaluation_results = None
+        st.session_state.suggestions = []
+        st.rerun() # Rerun to update the displayed question below
+
+    # Display the full selected question
+    question_id = st.session_state.selected_question_id
+    st.subheader("Selected Question:")
+    st.markdown(f"**Q{question_id}:** {upsc_qa[question_id]['question']}")
+
+    st.info("➡️ After selecting your question, go to the 'Submit & Evaluate' tab.")
+
+
+# --- Tab 2: Submission and Evaluation ---
 with tab2:
-    st.header(f"Answer for Question {st.session_state.selected_question_id}")
-    st.write(upsc_qa[st.session_state.selected_question_id]["question"])
-    
-    st.subheader("How would you like to submit your answer?")
-    
+    selected_qid = st.session_state.selected_question_id
+    st.header(f"Answer for Question {selected_qid}")
+    st.write(f"**Question:** {upsc_qa[selected_qid]['question']}")
+    st.divider()
+
+    st.subheader("Submit Your Answer")
+
     submission_method = st.radio(
         "Choose submission method:",
-        ["Type your answer", "Upload handwritten PDF"]
+        ["Type your answer", "Upload handwritten PDF"],
+        key="submission_method",
+        horizontal=True
     )
-    
+
+    pdf_path_to_delete = None # To track temporary file for deletion
+
+    # --- Handling Typed Input ---
     if submission_method == "Type your answer":
-        # Text input for typed answers
         st.session_state.answer_text = st.text_area(
             "Type your answer here:",
-            value=st.session_state.answer_text,
-            height=300
+            value=st.session_state.get("answer_text", ""), # Use get for safety
+            height=300,
+            key="typed_answer_area"
         )
-        
-        if st.button("Evaluate Typed Answer"):
-            if st.session_state.answer_text.strip() == "":
+
+        if st.button("Evaluate Typed Answer", key="eval_typed_btn", disabled=(not all([similarity_model, feedback_model]))):
+            if not st.session_state.answer_text.strip():
                 st.error("Please type an answer before evaluation.")
             else:
-                # Evaluate the typed answer
-                reference_answer = upsc_qa[st.session_state.selected_question_id]["answer"]
-                evaluation = evaluate_answer(st.session_state.answer_text, reference_answer)
-                suggestions = generate_suggestions(st.session_state.answer_text, reference_answer)
-                
-                # Store results in session state
-                st.session_state.extracted_text = st.session_state.answer_text
-                st.session_state.evaluation_results = evaluation
-                st.session_state.suggestions = suggestions
-                st.session_state.evaluation_done = True
-                
-                # Force rerun to show results
-                st.rerun()
-    
-    else:  # Upload handwritten PDF
-        # File uploader
-        uploaded_file = st.file_uploader("Upload a PDF with your handwritten answer", type=["pdf"])
-        
-        if uploaded_file is not None:
-            # Display a thumbnail of the uploaded PDF
-            st.write("PDF Preview (first page):")
-            
-            # Save the uploaded file temporarily
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-                tmp_file.write(uploaded_file.getvalue())
-                pdf_path = tmp_file.name
-            
-            # Add a button to process the file
-            if st.button("Process and Evaluate PDF"):
-                try:
-                    # Create a progress bar
-                    progress_bar = st.progress(0)
-                    
-                    # Process the PDF
-                    extracted_text = extract_text_from_pdf(pdf_path)
-                    
-                    # Evaluate the answer
-                    with st.spinner('Evaluating answer...'):
-                        reference_answer = upsc_qa[st.session_state.selected_question_id]["answer"]
-                        evaluation = evaluate_answer(extracted_text, reference_answer)
-                    
-                    # Generate suggestions
-                    with st.spinner('Generating suggestions...'):
-                        suggestions = generate_suggestions(extracted_text, reference_answer)
-                    
-                    # Store results in session state
-                    st.session_state.extracted_text = extracted_text
+                # Models are needed here
+                if similarity_model and feedback_model and feedback_tokenizer:
+                    reference_answer = upsc_qa[selected_qid]["answer"]
+                    question_text = upsc_qa[selected_qid]["question"]
+
+                    # Perform evaluation and generate suggestions
+                    evaluation = evaluate_answer_hf(similarity_model, st.session_state.answer_text, reference_answer)
+                    suggestions = generate_suggestions_hf(feedback_model, feedback_tokenizer, question_text, reference_answer, st.session_state.answer_text)
+
+                    # Store results
                     st.session_state.evaluation_results = evaluation
                     st.session_state.suggestions = suggestions
                     st.session_state.evaluation_done = True
-                    
-                    # Force rerun to show results
-                    st.rerun()
-                        
-                except Exception as e:
-                    st.error(f"An error occurred: {str(e)}")
-                
-                finally:
-                    # Clean up - delete the temporary file
-                    if os.path.exists(pdf_path):
-                        os.remove(pdf_path)
-    
-    # Display evaluation results if available
-    if st.session_state.evaluation_done:
-        st.header("Evaluation Results")
-        
-        # Create tabs for Results and Suggestions
-        results_tab, suggestions_tab, reference_tab = st.tabs(["Evaluation", "Improvement Suggestions", "Reference Answer"])
-        
-        with results_tab:
-            st.subheader("Your Answer")
-            st.text_area("Extracted/Submitted Text:", value=st.session_state.extracted_text, height=200)
-            
-            st.subheader("Score")
-            similarity_score = st.session_state.evaluation_results["similarity"] * 100
-            
-            # Display score with color coding
-            if similarity_score >= 70:
-                st.success(f"Similarity Score: {similarity_score:.1f}%")
-            elif similarity_score >= 50:
-                st.warning(f"Similarity Score: {similarity_score:.1f}%")
-            else:
-                st.error(f"Similarity Score: {similarity_score:.1f}%")
-            
-            # Visualize score
-            st.progress(min(float(similarity_score/100), 1.0))
-            
-            # Performance interpretation
-            if similarity_score >= 80:
-                st.success("Excellent! Your answer aligns very well with the expected response.")
-            elif similarity_score >= 70:
-                st.success("Very good! Your answer covers most key points effectively.")
-            elif similarity_score >= 60:
-                st.info("Good attempt! Your answer addresses the question but could be improved.")
-            elif similarity_score >= 50:
-                st.warning("Fair attempt. Your answer needs more development and precision.")
-            else:
-                st.error("Your answer needs significant improvement in content and approach.")
-            
-            # Key concepts covered/missed
-            reference_answer = st.session_state.evaluation_results["reference_answer"]
-            ref_key_concepts = extract_key_concepts(reference_answer)
-            student_key_concepts = extract_key_concepts(st.session_state.extracted_text)
-            
-            # Find overlap
-            common_concepts = set(student_key_concepts).intersection(set(ref_key_concepts))
-            missed_concepts = set(ref_key_concepts) - set(student_key_concepts)
-            
-            st.subheader("Key Concepts Analysis")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write("Concepts You Covered Well:")
-                for concept in common_concepts:
-                    st.success(f"✓ {concept.capitalize()}")
-            
-            with col2:
-                st.write("Important Concepts to Include:")
-                for concept in missed_concepts:
-                    st.error(f"✗ {concept.capitalize()}")
-        
-        with suggestions_tab:
-            st.subheader("Suggestions for Improvement")
-            for i, suggestion in enumerate(st.session_state.suggestions, 1):
-                st.info(f"{i}. {suggestion}")
-            
-            st.subheader("General Writing Tips")
-            st.write("""
-            1. **Structure**: Use a clear introduction, body and conclusion
-            2. **Precision**: Use specific facts, figures, and examples
-            3. **Balance**: Present multiple perspectives for critical questions
-            4. **Relevance**: Stay focused on the exact question asked
-            5. **Conciseness**: Aim for quality over quantity in your response
-            """)
-        
-        with reference_tab:
-            st.subheader("Reference Answer")
-            st.write("""
-            Note: This is provided as a learning resource. There is no single 'perfect' answer, and examinations reward 
-            original thinking that demonstrates understanding of core concepts.
-            """)
-            st.info(upsc_qa[st.session_state.selected_question_id]["answer"])
+                    st.rerun() # Rerun to display results section
+                else:
+                    st.error("Models required for evaluation are not loaded. Cannot proceed.")
+
+    # --- Handling PDF Upload ---
+    else: # Upload handwritten PDF
+        uploaded_file = st.file_uploader(
+            f"Upload a PDF of your handwritten answer (OCR Model: {OCR_MODEL})",
+            type=["pdf"],
+            key="pdf_uploader"
+            )
+
+        if uploaded_file is not None:
+            st.info(f"File '{uploaded_file.name}' uploaded. Click below to process.")
+
+            if st.button("Process and Evaluate PDF", key="eval_pdf_btn", disabled=(not all([ocr_pipe, similarity_model, feedback_model]))):
+                 # Ensure all models are loaded before proceeding
+                if ocr_pipe and similarity_model and feedback_model and feedback_tokenizer:
+                    # Save uploaded file temporarily
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+                        tmp_file.write(uploaded_file.getvalue())
+                        pdf_path = tmp_file.name
+                        pdf_path_to_delete = pdf_path # Mark for deletion later
+
+                    try:
+                        # 1. Extract text using HF OCR pipeline
+                        extracted_text = extract_text_from_pdf_hf(pdf_path, ocr_pipe)
+                        st.session_state.answer_text = extracted_text # Store extracted text
+
+                        if not extracted_text:
+                            st.error("Text extraction failed or yielded no text. Cannot evaluate.")
+                            st.session_state.evaluation_done = False
+                        else:
+                             # 2. Evaluate the answer
+                            reference_answer = upsc_qa[selected_qid]["answer"]
+                            evaluation = evaluate_answer_hf(similarity_model, extracted_text, reference_answer)
+
+                            # 3. Generate suggestions
+                            question_text = upsc_qa[selected_qid]["question"]
+                            suggestions = generate_suggestions_hf(feedback_model, feedback_tokenizer, question_text, reference_answer, extracted_text)
+
+                            # Store results
+                            st.session_state.evaluation_results = evaluation
+                            st.session_state.suggestions = suggestions
+                            st.session_state.evaluation_done = True
+                            st.rerun() # Rerun to display results
+
+                    except Exception as e:
+                        st.error(f"An unexpected error occurred during PDF processing/evaluation: {e}")
+                        st.session_state.evaluation_done = False
+
+                    finally:
+                        # Clean up the temporary file
+                        if pdf_path_to_delete and os.path.exists(pdf_path_to_delete):
+                            try:
+                                os.remove(pdf_path_to_delete)
+                            except PermissionError:
+                                st.warning(f"Could not delete temporary file {pdf_path_to_delete}. It might be locked.")
+                else:
+                    st.error("One or more required AI models are not loaded. Cannot process PDF.")
+
+
+    st.divider()
+
+    # --- Display Evaluation Results ---
+    if st.session_state.get("evaluation_done", False):
+        st.header("📊 Evaluation Results & Feedback")
+
+        eval_results = st.session_state.evaluation_results
+        suggestions = st.session_state.suggestions
+        submitted_text = st.session_state.answer_text
+
+        if eval_results:
+            results_tab, feedback_tab, reference_tab = st.tabs(["Evaluation Score", "AI Feedback", "Reference Answer"])
+
+            with results_tab:
+                st.subheader("Your Answer (Submitted/Extracted)")
+                st.text_area("Submitted Text:", value=submitted_text, height=200, disabled=True)
+
+                st.subheader("Semantic Similarity Score")
+                similarity_score = eval_results.get("similarity", 0.0) * 100
+
+                # Display score with color coding
+                score_color = "green" if similarity_score >= 70 else "orange" if similarity_score >= 50 else "red"
+                st.markdown(f"**Score:** <span style='color:{score_color}; font-size: 1.2em;'>{similarity_score:.1f}%</span> (Compared to reference answer using '{SIMILARITY_MODEL}')", unsafe_allow_html=True)
+
+                # Visualize score
+                st.progress(min(float(similarity_score/100), 1.0))
+
+                # Performance interpretation based on similarity
+                if similarity_score >= 80:
+                    st.success("✅ Excellent! Your answer shows strong semantic similarity to the reference.")
+                elif similarity_score >= 70:
+                    st.success("👍 Very Good! Your answer covers most key concepts effectively.")
+                elif similarity_score >= 60:
+                    st.info("🙂 Good! Your answer addresses the main points but could be more aligned.")
+                elif similarity_score >= 50:
+                    st.warning("🤔 Fair. There's overlap, but significant differences exist.")
+                else:
+                    st.error("⚠️ Needs Improvement. Your answer differs significantly from the reference.")
+                st.caption("Note: Semantic similarity measures how close the *meaning* is, not just keyword overlap. A high score indicates conceptual alignment.")
+
+
+            with feedback_tab:
+                st.subheader(f"AI-Generated Feedback (using {FEEDBACK_MODEL})")
+                if suggestions:
+                    st.info("Here's feedback based on the question, reference, and your answer:")
+                    for i, suggestion in enumerate(suggestions, 1):
+                        st.markdown(f"{suggestion}") # Use markdown for potential formatting from model
+                else:
+                    st.warning("Could not generate feedback.")
+
+                st.subheader("General Writing Tips (UPSC Context)")
+                st.write("""
+                * **Structure:** Clear Intro-Body-Conclusion is vital. Use paragraphs effectively.
+                * **Relevance:** Directly address *all* parts of the question. Avoid tangents.
+                * **Content:** Use specific facts, data, examples, and keywords relevant to the syllabus.
+                * **Analysis:** Don't just describe; analyze, critique, and provide balanced viewpoints where required.
+                * **Clarity & Conciseness:** Write clearly. Avoid jargon where simpler terms suffice. Be mindful of word limits.
+                """)
+
+            with reference_tab:
+                st.subheader("Reference Answer")
+                st.info("Use this as a guide to understand the key points expected. Your answer might still be valid if structured differently but covering core concepts.")
+                ref_answer = eval_results.get("reference_answer", "Reference answer not available.")
+                st.markdown(ref_answer)
+        else:
+            st.warning("Evaluation results are not available.")
 
         # Reset button
-        if st.button("Answer Another Question"):
+        if st.button("Evaluate Another Answer / New Question"):
+            # Clear relevant state
             st.session_state.evaluation_done = False
             st.session_state.answer_text = ""
+            st.session_state.evaluation_results = None
+            st.session_state.suggestions = []
+            # Optionally navigate back to question selection or just clear the current state
+            # st.session_state.selected_question_id = default_question_id # Uncomment to reset question too
             st.rerun()
+
+st.divider()
+
+# --- Section on Evaluating the AI's Evaluation ---
+with st.expander("Evaluating the AI's Evaluation (Meta-Evaluation)"):
+    st.markdown("""
+    It's important to critically assess the AI's output (both the score and the feedback). Here's how you can think about it, along with prompts you could potentially use with another AI model (like GPT-4, Claude, or even another instance of Flan-T5) for assessment:
+
+    **1. Assessing the Similarity Score:**
+    * **Does the score *feel* right?** Based on your own understanding, does the percentage reasonably reflect how close your answer was to the reference?
+    * **Limitations:** Semantic similarity doesn't always capture factual correctness perfectly or adherence to specific instructions (like word count). A high similarity score might still hide factual errors if the *structure* and *topic* are similar.
+
+    * **Example Evaluation Prompt:**
+        ```
+        Question: [Paste the UPSC Question Here]
+        Reference Answer: [Paste the Reference Answer Here]
+        Student Answer: [Paste the Student's Answer Here]
+        AI Similarity Score: [Paste the Score, e.g., 75.3%]
+
+        Task: Critically evaluate the AI's similarity score. Does this score accurately reflect the semantic closeness and overall quality of the student's answer compared to the reference? Explain your reasoning, considering relevance, completeness, and potential limitations of semantic similarity. Is the score too high, too low, or about right? Why?
+        ```
+
+    **2. Assessing the AI-Generated Feedback:**
+    * **Is it Relevant?** Does the feedback directly relate to the question, your answer, and the reference points?
+    * **Is it Specific?** Does it point out concrete areas (e.g., "missing discussion on financial devolution", "needs clearer examples") or is it too generic (e.g., "improve your answer")?
+    * **Is it Actionable?** Does the feedback give you clear steps or directions on *how* to improve?
+    * **Is it Accurate?** Does the feedback correctly identify strengths/weaknesses? Did it hallucinate or misunderstand something?
+    * **Is it Constructive?** Is the tone helpful?
+
+    * **Example Evaluation Prompt:**
+        ```
+        Question: [Paste the UPSC Question Here]
+        Reference Answer: [Paste the Reference Answer Here]
+        Student Answer: [Paste the Student's Answer Here]
+        AI Generated Feedback: [Paste the Bulleted List of Feedback Here]
+
+        Task: Evaluate the quality of the AI-generated feedback based on the provided context. Rate its helpfulness on a scale of 1 (Not Helpful) to 5 (Very Helpful). Justify your rating by assessing its relevance, specificity, actionability, accuracy, and constructive tone. What are the strengths and weaknesses of this feedback?
+        ```
+
+    By performing this kind of meta-evaluation, you can better understand the capabilities and limitations of the AI tools used here.
+    """)
+
 
 # Add a footer
 st.markdown("---")
-st.markdown("© 2025 SelectionAI - Developed for UPSC Answer Evaluation")
+st.markdown("© 2025 SelectionAI (Hugging Face Edition) - AI models for educational purposes.")
+
+# --- Final Cleanup ---
+# Ensure temp file is deleted if an error occurred before the 'finally' block in the PDF section
+if pdf_path_to_delete and os.path.exists(pdf_path_to_delete):
+     try:
+         os.remove(pdf_path_to_delete)
+     except Exception:
+         pass # Ignore if deletion fails here, already warned user potentially
