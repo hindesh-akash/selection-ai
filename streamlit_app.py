@@ -315,7 +315,7 @@ with tab2:
                 st.session_state.evaluation_done = True
                 
                 # Force rerun to show results
-                st.experimental_rerun()
+                st.rerun()
     
     else:  # Upload handwritten PDF
         # File uploader
@@ -355,7 +355,7 @@ with tab2:
                     st.session_state.evaluation_done = True
                     
                     # Force rerun to show results
-                    st.experimental_rerun()
+                    st.rerun()
                         
                 except Exception as e:
                     st.error(f"An error occurred: {str(e)}")
@@ -450,7 +450,7 @@ with tab2:
         if st.button("Answer Another Question"):
             st.session_state.evaluation_done = False
             st.session_state.answer_text = ""
-            st.experimental_rerun()
+            st.rerun()
 
 # Add a footer
 st.markdown("---")
