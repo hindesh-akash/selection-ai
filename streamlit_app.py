@@ -13,8 +13,11 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 # Download NLTK resources
-nltk.download('punkt')
-nltk.download('stopwords')
+nltk_data_path = os.path.expanduser('~/nltk_data')
+if not os.path.exists(os.path.join(nltk_data_path, 'tokenizers/punkt')):
+    nltk.download('punkt')
+if not os.path.exists(os.path.join(nltk_data_path, 'corpora/stopwords')):
+    nltk.download('stopwords')
 
 # Page config
 st.set_page_config(
